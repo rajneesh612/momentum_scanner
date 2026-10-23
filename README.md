@@ -3,10 +3,12 @@
 A web application for scanning and ranking Indian stocks by momentum. This
 repository currently implements the **project scaffold, the Market Data
 Foundation** (Stock/PriceHistory persistence, a Yahoo Finance provider, and
-history/sync API endpoints), **a data/chart dashboard, and a single-symbol
-SMA-crossover backtester** — composite momentum scoring/ranking across many
-stocks, authentication, and watchlists are not implemented yet. This README
-will grow as those pieces are added.
+history/sync API endpoints), **a data/chart dashboard, a single-symbol
+SMA-crossover backtester, a news/corporate-event layer, and a daily NIFTY 500
+hybrid trend/momentum/volume signal scanner with Telegram alerts** —
+composite momentum scoring/ranking across many stocks, authentication, and
+watchlists are not implemented yet. This README will grow as those pieces
+are added.
 
 ## 1. Project Overview
 
@@ -38,6 +40,13 @@ Right now, the project has:
   and run the SMA-crossover strategy, view the equity curve vs. buy-and-hold
   and the resulting trade list).
 - A PostgreSQL database via Docker Compose.
+- A daily **NIFTY 500 hybrid signal scanner** (`app/momentum/hybrid_signal.py`
+  + `app/services/scan_service.py`) that evaluates a configurable
+  trend/momentum/volume strategy against completed daily candles, persists
+  BUY/SELL transitions (`SignalEvent`), and sends Telegram alerts — see
+  [Daily Hybrid Signal Scanner](#12-daily-hybrid-signal-scanner) below.
+- Alembic migrations (`backend/migrations/`) for every table, including the
+  two tables that predate Alembic being introduced into this project.
 
 ## 2. Architecture
 
@@ -92,6 +101,9 @@ Design principles enforced by the folder structure:
 - Uvicorn
 - Pandas / NumPy
 - yfinance
+- APScheduler (daily scan scheduling)
+- Alembic (database migrations)
+- httpx (Telegram Bot API calls)
 - Pytest
 - Ruff
 
@@ -121,7 +133,9 @@ momentum-stock-scanner/
 │   │   │       ├── health.py          # / and /health endpoints
 │   │   │       ├── stocks.py          # GET /stocks, GET /stocks/{symbol}/history
 │   │   │       ├── market_data.py     # POST /market-data/sync/{symbol}
-│   │   │       └── backtest.py        # POST /backtest/{symbol}
+│   │   │       ├── backtest.py        # POST /backtest/{symbol}
+│   │   │       ├── events.py          # News/corporate-event endpoints
+│   │   │       └── signals.py         # Scanner: signals, scans, manual trigger, Telegram test
 │   │   │
 │   │   ├── core/
 │   │   │   ├── config.py              # Pydantic Settings
@@ -129,35 +143,61 @@ momentum-stock-scanner/
 │   │   │
 │   │   ├── models/
 │   │   │   ├── stock.py               # Stock ORM model
-│   │   │   └── price_history.py       # PriceHistory ORM model
+│   │   │   ├── price_history.py       # PriceHistory ORM model
+│   │   │   ├── stock_event.py         # StockEvent ORM model
+│   │   │   ├── signal_event.py        # SignalEvent (BUY/SELL transitions)
+│   │   │   ├── scan_run.py            # ScanRun (scan audit trail)
+│   │   │   ├── notification_delivery.py # NotificationDelivery (Telegram attempts)
+│   │   │   ├── scan_lock.py           # ScanLock (DB-backed mutex)
+│   │   │   ├── universe_membership.py # UniverseMembershipEvent (add/remove history)
+│   │   │   └── strategy_config.py     # StrategyConfigVersion (config audit log)
 │   │   ├── schemas/
 │   │   │   ├── stock.py               # StockRead, StockListResponse
 │   │   │   ├── price_history.py       # PriceHistoryRead
 │   │   │   ├── market_data.py         # HistoricalPriceResponse, MarketDataSyncResponse
-│   │   │   └── backtest.py            # BacktestResponse and friends
+│   │   │   ├── backtest.py            # BacktestResponse and friends
+│   │   │   └── signal.py              # SignalEventRead, ScanRunRead, HybridBacktestResponse, ...
 │   │   ├── services/
 │   │   │   ├── market_data_service.py # MarketDataService (price fetch + persist)
 │   │   │   ├── stock_service.py       # Stock master: import_stocks, list_stocks
-│   │   │   └── backtest_service.py    # Bridges PriceHistory -> the backtest engine
+│   │   │   ├── backtest_service.py    # Bridges PriceHistory -> the SMA backtest engine
+│   │   │   ├── universe_service.py    # NIFTY 500 universe refresh/deactivation/history
+│   │   │   ├── signal_service.py      # Per-symbol hybrid-signal evaluation + persistence
+│   │   │   ├── scan_service.py        # Full-universe scan orchestration
+│   │   │   ├── scan_lock_service.py   # DB-backed mutex (prevents concurrent scans)
+│   │   │   ├── telegram_service.py    # Telegram Bot API delivery (retry/backoff)
+│   │   │   ├── notification_service.py # Formats + idempotently delivers notifications
+│   │   │   └── trading_calendar.py    # Weekday-based "latest completed session" helper
 │   │   │
 │   │   ├── data/
 │   │   │   ├── ingestion/
 │   │   │   │   ├── provider.py        # MarketDataProvider interface + shared errors
 │   │   │   │   ├── yahoo_finance.py   # YahooFinanceProvider (implemented)
-│   │   │   │   └── nse_stock_list.py  # NIFTY 500 constituent fetcher
+│   │   │   │   ├── nse_stock_list.py  # NIFTY 500 constituent fetcher
+│   │   │   │   ├── news_provider.py   # NewsProvider interface
+│   │   │   │   └── nse_announcements.py # NseAnnouncementsProvider (implemented)
 │   │   │   └── processing/            # Raw-data -> analysis-ready transforms
 │   │   │
 │   │   ├── momentum/
 │   │   │   ├── indicators.py          # Placeholder
 │   │   │   ├── scoring.py             # Placeholder
 │   │   │   ├── ranking.py             # Placeholder
-│   │   │   └── backtest.py            # SMA-crossover backtest engine (implemented)
+│   │   │   ├── backtest.py            # SMA-crossover backtest engine (implemented)
+│   │   │   ├── event_impact.py        # Post-event return-window analysis
+│   │   │   └── hybrid_signal.py       # Hybrid trend/momentum/volume engine + backtest
 │   │   │
+│   │   ├── scheduler.py               # APScheduler: daily scan, Asia/Kolkata cron
 │   │   └── main.py                    # FastAPI app entry point
 │   │
+│   ├── migrations/                    # Alembic migrations
+│   │   ├── env.py                     # Reads DATABASE_URL from Settings, not a 2nd config
+│   │   └── versions/
+│   │       ├── 0001_baseline_*.py     # stocks/price_history/stock_events (pre-Alembic tables)
+│   │       └── 0002_scanner_tables_*.py # every scanner table
 │   ├── scripts/
 │   │   └── import_nifty500.py         # CLI: idempotent stock-master import
 │   ├── tests/
+│   ├── alembic.ini
 │   ├── requirements.txt
 │   ├── pyproject.toml                 # Ruff + Pytest config
 │   └── .env.example
@@ -461,11 +501,19 @@ cd backend
 pytest
 ```
 
-Tests never make real Yahoo Finance network calls — `YahooFinanceProvider`
-is either mocked directly or swapped for a `FakeMarketDataProvider` via
-FastAPI dependency overrides (`app.dependency_overrides`), and database
-tests run against an isolated in-memory SQLite database rather than
-PostgreSQL.
+Tests never make real Yahoo Finance, NSE, or Telegram network calls —
+providers are either mocked directly (`unittest.mock.patch`) or swapped for
+fakes (`FakeMarketDataProvider`, `FakeNewsProvider`) via FastAPI dependency
+overrides (`app.dependency_overrides`), and database tests run against an
+isolated in-memory SQLite database rather than PostgreSQL. Scan-orchestration
+tests (`test_scan_service.py`) monkeypatch `SessionLocal` to point worker
+threads at that same SQLite engine instead of a real Postgres connection
+pool.
+
+To also run a manual scan against the real stack: `cd backend && python -m scripts.import_nifty500`
+first (so there's a universe to scan), then see
+[Daily Hybrid Signal Scanner](#12-daily-hybrid-signal-scanner) for the
+`POST /api/v1/scans/run` command.
 
 ## 11. Environment Variables
 
@@ -478,6 +526,17 @@ PostgreSQL.
 | `LOG_LEVEL`    | Logging level                             | `INFO`                                                                |
 | `DATABASE_URL` | SQLAlchemy PostgreSQL connection string   | `postgresql+psycopg2://postgres:postgres@localhost:5432/momentum_stock_scanner` |
 | `CORS_ORIGINS` | JSON list of allowed frontend origins     | `["http://localhost:5173"]`                                          |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token (see setup below) | *(blank)*                                                       |
+| `TELEGRAM_CHAT_ID`   | Telegram chat id to send alerts to   | *(blank)*                                                       |
+| `TELEGRAM_ALERTS_ENABLED` | Master on/off switch for Telegram alerts | `false`                                                 |
+| `TELEGRAM_MAX_NOTIFICATIONS_PER_SCAN` | Cap on alerts sent per scan run | `20`                                              |
+| `SCHEDULER_ENABLED`  | Run the daily scan automatically      | `false`                                                         |
+| `SCHEDULER_TIMEZONE` | Timezone for the scan schedule        | `Asia/Kolkata`                                                  |
+| `SCAN_POST_CLOSE_DELAY_MINUTES` | Informational buffer after NSE close | `45`                                                     |
+| `SCAN_HOUR_IST` / `SCAN_MINUTE_IST` | Daily scan time (IST, 24h)    | `16` / `15`                                              |
+| `SCAN_API_KEY`       | Required to call manual-trigger/test/refresh endpoints | *(blank = disabled)*                       |
+| `SCAN_MAX_CONCURRENT_SYMBOLS` | Per-scan symbol fetch concurrency | `5`                                                      |
+| `SCAN_MAX_RETRIES` / `SCAN_RETRY_BACKOFF_SECONDS` | Per-symbol fetch retry policy | `3` / `2.0`                                  |
 
 **Frontend** (`frontend/.env`, see `frontend/.env.example`):
 
@@ -497,28 +556,189 @@ root `.env` file):
 
 No secrets are hardcoded or committed anywhere in this repository.
 
-## 12. Future Development Roadmap
+## 12. Daily Hybrid Signal Scanner
+
+A daily end-of-day scanner over the NIFTY 500 universe: a configurable
+trend/momentum/volume strategy evaluated once per completed session,
+BUY/SELL transitions persisted and deduplicated, and (optionally) pushed to
+Telegram. This is a **research and decision-support tool, not an automated
+order-execution system** — nothing in this project places a live trade.
+
+### Strategy (baseline, configurable via `HybridStrategyConfig`)
+
+Computed from `adjusted_close` only (never mixed with unadjusted OHLC —
+avoids a split/bonus masquerading as a crash or rally). A rolling
+close-to-close stdev stands in for ATR (`volatility_pct`, informational
+only — true ATR needs split-adjusted high/low, which this project does not
+store).
+
+**BUY-eligible** when, on the latest *completed* session, all hold:
+close > SMA50, SMA50 > SMA200, 20-session return > 0, ~12-month
+(252-session) return > 0, and volume > 1.2× its 20-session average. A BUY
+signal fires only on the transition from ineligible → eligible — not every
+day the conditions keep holding.
+
+**SELL/exit** when, while in a position: close < SMA50, or SMA50 < SMA200.
+
+**Data quality**, always one of `ok` / `insufficient` (not enough history
+yet) / `stale` (latest bar is older than the session, within tolerance) /
+`missing` (nothing usable at all) — a signal is only ever generated on
+`ok`. See `app/momentum/hybrid_signal.py` for the full engine (also unit
+tested — `backend/tests/test_hybrid_signal.py`).
+
+### No look-ahead bias
+
+Live scanning only ever evaluates a session once the scheduler's
+post-close delay has passed (`app/services/trading_calendar.py`), and only
+reads bars at/before that session. The backtester (below) confirms a
+signal using the signal bar's own close, then **fills at the next
+session's close**, never the signal bar itself — covered by
+`test_hybrid_backtest_executes_on_next_bar_not_signal_bar`.
+
+### State durability & deduplication
+
+Whether a stock is "currently in a BUY position" is derived by reading the
+**most recent persisted `SignalEvent`** for that stock+strategy — never
+from an in-memory variable — so a backend restart or a second worker
+process always agrees on state. A DB unique constraint on
+`(stock_id, strategy_name, strategy_version, session_date, signal_type)` is
+a second-layer backstop against two concurrent scans racing on the same
+session (the loser's insert fails the constraint and is treated as
+"already recorded", not an error).
+
+### Universe management
+
+`POST /api/v1/universe/refresh` (reuses `app/data/ingestion/nse_stock_list.py`
+and `Stock.is_active`) fetches the live NIFTY 500 list, activates new
+symbols, and **deactivates** (never deletes) symbols that dropped out —
+every add/remove is logged to `UniverseMembershipEvent` for a partial
+survivorship-bias mitigation. If the NSE fetch fails, the existing universe
+is left completely untouched (never replaced with an empty/partial list).
+Universe refresh is a separate operation from scanning — a scan always
+runs against whatever universe was last successfully imported.
+
+### Scheduling
+
+`app/scheduler.py` runs the scan on weekdays at `SCAN_HOUR_IST:SCAN_MINUTE_IST`
+(`Asia/Kolkata`, default `16:15` — NSE closes `15:30` + a configurable
+post-close delay). It does **not** model NSE holidays — a scan on a holiday
+just finds stale data and reports it honestly, rather than fabricating a
+signal. A DB-backed lock (`scan_lock_service.py`, works the same on SQLite
+and Postgres) prevents two workers/processes from scanning concurrently;
+the loser gets `ScanLockHeldError`, logged and skipped, not escalated.
+Disabled by default (`SCHEDULER_ENABLED=false`) — enable it for a real
+deployment; in local dev, use the manual-trigger endpoint instead of
+leaving it on.
+
+**Local dev vs. production**: `SCHEDULER_ENABLED=true` starts an
+in-process `BackgroundScheduler` for as long as the `uvicorn` process is
+running — fine for a single long-running dev/staging process, but if this
+app is deployed to a platform that sleeps or restarts the process (e.g. a
+serverless/scale-to-zero host), the scheduler will miss runs while asleep.
+On such a platform, run the scan via an external scheduled trigger (e.g. a
+cron-triggered call to `POST /api/v1/scans/run`) instead of relying on the
+in-process scheduler.
+
+### Telegram alerts
+
+Uses the Telegram Bot API directly over HTTPS (`app/services/telegram_service.py`),
+with bounded retries/backoff on timeouts/429/5xx, and never marks a
+notification `sent` until Telegram's response confirms `ok: true`. A
+network timeout *after* Telegram already queued the message is a known,
+disclosed edge case where a duplicate message can occur — this is not
+hidden, and exactly-once delivery is not claimed.
+
+**Setup:**
+
+1. Message [@BotFather](https://core.telegram.org/bots#6-botfather) on
+   Telegram, `/newbot`, follow the prompts — it gives you a bot token.
+2. Send your new bot any message (so it has a chat to reply into).
+3. Fetch your chat id:
+   `curl https://api.telegram.org/bot<TOKEN>/getUpdates` and read
+   `result[0].message.chat.id` from the response.
+4. Set `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_ALERTS_ENABLED=true`
+   in `backend/.env`.
+5. Verify: `curl -X POST "http://localhost:8000/api/v1/telegram/test" -H "X-Scan-Api-Key: <your SCAN_API_KEY>"`
+   — sends a plain test message, never a fabricated BUY/SELL signal.
+
+A SELL message means "exit per this strategy", not "this stock is bad" or
+a short-sell recommendation — the message text says so explicitly.
+
+### Database migrations
+
+```bash
+cd backend
+# Fresh database (nothing created yet):
+alembic upgrade head
+
+# A database that already has stocks/price_history/stock_events from
+# before Alembic was introduced (e.g. this project's existing dev DB):
+alembic stamp 0001_baseline
+alembic upgrade head   # applies only 0002_scanner_tables
+```
+
+`migrations/env.py` reads the same `DATABASE_URL` the app itself uses
+(via `Settings`) — there is no second, independently-maintained connection
+string in `alembic.ini`.
+
+### API endpoints
+
+| Endpoint | Notes |
+| --- | --- |
+| `GET /api/v1/strategy-config` | Current `HybridStrategyConfig` values. |
+| `GET /api/v1/signals/latest` | Most recent signals across all symbols. |
+| `GET /api/v1/signals` | Filterable by `symbol`, `signal_type`, date range. |
+| `GET /api/v1/scans/latest` | Most recent scan run (404 if none yet). |
+| `GET /api/v1/scans` | Scan-run history. |
+| `POST /api/v1/scans/run` | Manual trigger — **requires `X-Scan-Api-Key`**. |
+| `POST /api/v1/telegram/test` | Plain test message — **requires `X-Scan-Api-Key`**. |
+| `POST /api/v1/universe/refresh` | Refresh NIFTY 500 list — **requires `X-Scan-Api-Key`**. |
+| `POST /api/v1/backtest/hybrid/{symbol}` | Backtests the *same* strategy code the live scanner runs. |
+
+`X-Scan-Api-Key`-protected endpoints return `503` if `SCAN_API_KEY` isn't
+configured at all, `401` on a wrong/missing header.
+
+### Known limitations
+
+- No real NSE trading-holiday calendar (weekday-only).
+- `adjusted_close`-only volatility proxy, not true ATR.
+- Universe history starts from whenever refreshes began running in this
+  deployment — no historical point-in-time NIFTY 500 constituent data
+  exists to backfill from, so a backtest run today still uses *today's*
+  universe membership for any past date (a labeled, not hidden,
+  survivorship-bias limitation).
+- Backtest cost model is a single flat round-trip `cost_bps`, not a full
+  brokerage/STT/stamp-duty breakdown.
+- Sharpe ratio uses a 0% risk-free rate, not a real T-bill yield.
+- Telegram delivery is best-effort retried, not exactly-once.
+
+## 13. Future Development Roadmap
 
 The Market Data Foundation (`Stock`/`PriceHistory` models, Yahoo Finance
 ingestion, sync/history endpoints), the Data/Backtest frontend, a
-single-symbol SMA-crossover backtest engine, and a searchable NIFTY 500
-stock master (import + `GET /api/v1/stocks` + frontend combobox) are done.
+single-symbol SMA-crossover backtest engine, a searchable NIFTY 500 stock
+master (import + `GET /api/v1/stocks` + frontend combobox), a news/
+corporate-event layer, Alembic migrations, and the daily hybrid signal
+scanner with Telegram alerts (see
+[Daily Hybrid Signal Scanner](#12-daily-hybrid-signal-scanner)) are done.
 Still to be built incrementally:
 
-1. Alembic migrations (tables are currently created ad hoc / via
-   `Base.metadata.create_all()` in tests — no migration tooling yet).
-2. Full-NSE stock master coverage (today's import is NIFTY 500 only — see
+1. Full-NSE stock master coverage (today's import is NIFTY 500 only — see
    [Importing the stock master](#importing-the-stock-master) — there's no
    equally reliable single published source for the complete NSE list).
-3. Database models for `momentum_scores`, `watchlists`, `users`,
+2. Database models for `momentum_scores`, `watchlists`, `users`,
    `market_indices`.
-4. Data processing pipelines (raw prices -> clean, analysis-ready series).
-5. Composite momentum indicators/scoring/ranking across many stocks
+3. Data processing pipelines (raw prices -> clean, analysis-ready series).
+4. Composite momentum indicators/scoring/ranking across many stocks
    (`app/momentum/indicators.py` and `scoring.py` are still placeholders;
-   `backtest.py` only computes the SMAs it needs for itself). Additional
-   backtest strategies (return-threshold, breakout) beyond SMA crossover.
-6. API endpoints exposing momentum rankings and watchlists.
-7. Frontend pages/components: momentum ranking table, watchlist management.
-8. Authentication and user accounts.
-9. Notifications / alerts.
-10. Production deployment configuration.
+   the SMA and hybrid backtest engines each only compute the indicators
+   they need for themselves). Additional backtest strategies beyond SMA
+   crossover and the hybrid strategy.
+5. API endpoints exposing momentum rankings and watchlists.
+6. Frontend pages/components: momentum ranking table, watchlist management.
+7. Authentication and user accounts (including securing the scanner's
+   manual-trigger endpoints beyond a single shared `SCAN_API_KEY`).
+8. A real NSE trading-holiday calendar for the scheduler (currently
+   weekday-only — see [Known limitations](#known-limitations)).
+9. Production deployment configuration (process manager/supervisor for
+   the scheduler, secrets management for `TELEGRAM_BOT_TOKEN`/`SCAN_API_KEY`).

@@ -2,12 +2,14 @@ import { useState } from 'react'
 
 import Backtest from './pages/Backtest'
 import Dashboard from './pages/Dashboard'
+import Signals from './pages/Signals'
 
-type Tab = 'data' | 'backtest'
+type Tab = 'data' | 'backtest' | 'signals'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'data', label: 'Data' },
   { id: 'backtest', label: 'Backtest' },
+  { id: 'signals', label: 'Scanner' },
 ]
 
 function App() {
@@ -33,7 +35,9 @@ function App() {
           ))}
         </div>
       </nav>
-      {tab === 'data' ? <Dashboard /> : <Backtest />}
+      {tab === 'data' && <Dashboard />}
+      {tab === 'backtest' && <Backtest />}
+      {tab === 'signals' && <Signals />}
     </div>
   )
 }

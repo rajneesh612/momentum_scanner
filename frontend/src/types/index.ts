@@ -158,3 +158,97 @@ export interface BacktestResponse {
   equity_curve: BacktestEquityPoint[]
   trades: BacktestTrade[]
 }
+
+// --- Daily NIFTY 500 hybrid signal scanner ---
+
+export type SignalType = 'BUY' | 'SELL'
+export type DataQualityStatus = 'ok' | 'insufficient' | 'stale' | 'missing'
+export type NotificationStatus = 'not_applicable' | 'pending' | 'sent' | 'failed'
+export type ScanRunStatus = 'running' | 'success' | 'partial_failure' | 'failed'
+
+export interface SignalEvent {
+  id: number
+  stock_id: number
+  symbol: string
+  scan_run_id: number | null
+  strategy_name: string
+  strategy_version: string
+  session_date: string
+  signal_type: SignalType
+  price: number
+  indicators: Record<string, number | null>
+  data_quality_status: DataQualityStatus
+  notification_status: NotificationStatus
+  generated_at: string
+}
+
+export interface SignalEventListResponse {
+  items: SignalEvent[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface ScanRun {
+  id: number
+  trigger: 'scheduled' | 'manual'
+  session_date: string
+  strategy_name: string
+  strategy_version: string
+  status: ScanRunStatus
+  started_at: string
+  finished_at: string | null
+  universe_size: number
+  symbols_succeeded: number
+  symbols_failed: number
+  symbols_stale: number
+  symbols_skipped: number
+  buy_signals: number
+  sell_signals: number
+  error_message: string | null
+}
+
+export interface StrategyConfig {
+  name: string
+  version: string
+  sma_short: number
+  sma_mid: number
+  sma_long: number
+  momentum_short_days: number
+  momentum_long_days: number
+  volume_lookback: number
+  volume_multiplier: number
+  volatility_lookback: number
+  max_staleness_days: number
+}
+
+export interface SymbolScanOutcome {
+  symbol: string
+  status: string
+  signal_type: SignalType | null
+  data_quality: string | null
+  error: string | null
+}
+
+export interface ManualScanResponse {
+  scan_run_id: number
+  status: ScanRunStatus
+  session_date: string
+  universe_size: number
+  symbols_succeeded: number
+  symbols_failed: number
+  symbols_stale: number
+  symbols_skipped: number
+  buy_signals: number
+  sell_signals: number
+  notifications_sent: number
+  notifications_failed: number
+  notifications_skipped_cap: number
+  error_message: string | null
+  data_quality_report: SymbolScanOutcome[]
+}
+
+export interface TelegramTestResponse {
+  success: boolean
+  error: string | null
+}

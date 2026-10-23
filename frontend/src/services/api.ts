@@ -9,9 +9,14 @@ import type {
   HealthStatus,
   HistoricalPriceResponse,
   Interval,
+  ManualScanResponse,
   MarketDataSyncResponse,
+  ScanRun,
+  SignalEventListResponse,
   StockEventListResponse,
   StockListResponse,
+  StrategyConfig,
+  TelegramTestResponse,
 } from '../types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
@@ -180,4 +185,61 @@ export async function getEventImpact(symbol: string, eventId: number): Promise<E
   }
 
   return response.json() as Promise<EventImpactResponse>
+}
+
+// --- Daily NIFTY 500 hybrid signal scanner ---
+
+export async function getLatestSignals(limit = 50): Promise<SignalEventListResponse> {
+  const response = await fetch(`${API_V1_URL}/signals/latest?limit=${limit}`)
+  if (!response.ok) {
+    throw new ApiError(await errorDetail(response), response.status)
+  }
+  return response.json() as Promise<SignalEventListResponse>
+}
+
+export async function getLatestScan(): Promise<ScanRun | null> {
+  const response = await fetch(`${API_V1_URL}/scans/latest`)
+  if (response.status === 404) return null
+  if (!response.ok) {
+    throw new ApiError(await errorDetail(response), response.status)
+  }
+  return response.json() as Promise<ScanRun>
+}
+
+export async function listScans(limit = 20): Promise<{ items: ScanRun[]; total: number }> {
+  const response = await fetch(`${API_V1_URL}/scans?limit=${limit}`)
+  if (!response.ok) {
+    throw new ApiError(await errorDetail(response), response.status)
+  }
+  return response.json() as Promise<{ items: ScanRun[]; total: number }>
+}
+
+export async function getStrategyConfig(): Promise<StrategyConfig> {
+  const response = await fetch(`${API_V1_URL}/strategy-config`)
+  if (!response.ok) {
+    throw new ApiError(await errorDetail(response), response.status)
+  }
+  return response.json() as Promise<StrategyConfig>
+}
+
+export async function triggerManualScan(apiKey: string): Promise<ManualScanResponse> {
+  const response = await fetch(`${API_V1_URL}/scans/run`, {
+    method: 'POST',
+    headers: { 'X-Scan-Api-Key': apiKey },
+  })
+  if (!response.ok) {
+    throw new ApiError(await errorDetail(response), response.status)
+  }
+  return response.json() as Promise<ManualScanResponse>
+}
+
+export async function sendTelegramTest(apiKey: string): Promise<TelegramTestResponse> {
+  const response = await fetch(`${API_V1_URL}/telegram/test`, {
+    method: 'POST',
+    headers: { 'X-Scan-Api-Key': apiKey },
+  })
+  if (!response.ok) {
+    throw new ApiError(await errorDetail(response), response.status)
+  }
+  return response.json() as Promise<TelegramTestResponse>
 }
